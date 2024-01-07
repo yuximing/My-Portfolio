@@ -1,11 +1,9 @@
 import type { Metadata } from 'next';
-import { Suspense, cache } from 'react';
+// import { Suspense, cache } from 'react';
 import { notFound } from 'next/navigation';
-import { Mdx } from 'components/mdx';
-import { getTweets } from 'lib/twitter';
+import { CustomMDX } from 'components/mdx';
+import { serialize } from "next-mdx-remote/serialize";
 import { getBlogPosts } from 'app/db/blog';
-import Balancer from 'react-wrap-balancer';
-import ViewCounter from '../view-counter';
 
 // export async function generateStaticParams() {
 //   return allBlogs.map((post) => ({
@@ -13,47 +11,47 @@ import ViewCounter from '../view-counter';
 //   }));
 // }
 
-// export async function generateMetadata({
-//   params,
-// }): Promise<Metadata | undefined> {
-//   let post = getBlogPosts().find((post) => post.slug === params.slug);
-//   if (!post) {
-//     return;
-//   }
+export async function generateMetadata({
+  params,
+}): Promise<Metadata | undefined> {
+  let post = getBlogPosts().find((post) => post.slug === params.slug);
+  if (!post) {
+    return;
+  }
 
-//   const {
-//     title,
-//     publishedAt: publishedTime,
-//     summary: description,
-//     image,
-//   } = post.metadata;
-//   const ogImage = image // TODO
-//     ? `https://leerob.io${image}`
-//     : `https://leerob.io/api/og?title=${title}`;
+  const {
+    title,
+    publishedAt: publishedTime,
+    summary: description,
+    image,
+  } = post.metadata;
+  const ogImage = image
+    ? `https://portfolio-yuximing.vercel.app${image}`
+    : `https://portfolio-yuximing.vercel.app/api/og?title=${title}`;
 
-//   return {
-//     title,
-//     description,
-//     openGraph: {
-//       title,
-//       description,
-//       type: 'article',
-//       publishedTime,
-//       url: `https://leerob.io/blog/${slug}`,
-//       images: [
-//         {
-//           url: ogImage,
-//         },
-//       ],
-//     },
-//     twitter: {
-//       card: 'summary_large_image',
-//       title,
-//       description,
-//       images: [ogImage],
-//     },
-//   };
-// }
+  return {
+    title,
+    description,
+    openGraph: {
+      title,
+      description,
+      type: 'article',
+      publishedTime,
+      url: `https://portfolio-yuximing.vercel.app/blog/${post.slug}`,
+      images: [
+        {
+          url: ogImage,
+        },
+      ],
+    },
+    twitter: {
+      card: 'summary_large_image',
+      title,
+      description,
+      images: [ogImage],
+    },
+  };
+}
 
 function formatDate(date: string) {
   let currentDate = new Date();
@@ -89,30 +87,14 @@ function formatDate(date: string) {
 
 export default async function Blog({ params }) {
   let post = getBlogPosts().find((post) => post.slug === params.slug);
-
+  
   if (!post) {
     notFound();
   }
-
-  // const tweets = await getTweets(post.tweetIds);
+  
+  const source = await serialize(post.content);
 
   return (
-    // <section>
-    //   <script type="application/ld+json">
-    //     {JSON.stringify(post.structuredData)}
-    //   </script>
-    //   <h1 className="font-bold text-3xl font-serif max-w-[650px]">
-    //     <Balancer>{post.title}</Balancer>
-    //   </h1>
-    //   <div className="grid grid-cols-[auto_1fr_auto] items-center mt-4 mb-8 font-mono text-sm max-w-[650px]">
-    //     <div className="bg-neutral-100 dark:bg-neutral-800 rounded-md px-2 py-1 tracking-tighter">
-    //       {post.publishedAt}
-    //     </div>
-    //     <div className="h-[0.2em] bg-neutral-50 dark:bg-neutral-800 mx-2" />
-    //     <ViewCounter slug={post.slug} trackView />
-    //   </div>
-    //   <Mdx code={post.body.code} tweets={tweets} />
-    // </section>
     <section>
       <script
         type="application/ld+json"
@@ -125,13 +107,13 @@ export default async function Blog({ params }) {
             datePublished: post.metadata.publishedAt,
             dateModified: post.metadata.publishedAt,
             description: post.metadata.summary,
-            image: post.metadata.image // TODO
-              ? `https://leerob.io${post.metadata.image}`
-              : `https://leerob.io/og?title=${post.metadata.title}`,
-            url: `https://leerob.io/blog/${post.slug}`,
+            image: post.metadata.image
+              ? `https://portfolio-yuximing.vercel.app${post.metadata.image}`
+              : `https://portfolio-yuximing.vercel.app/og?title=${post.metadata.title}`,
+            url: `https://portfolio-yuximing.vercel.app/blog/${post.slug}`,
             author: {
               '@type': 'Person',
-              name: 'Lee Robinson',
+              name: 'Ximing Yu',
             },
           }),
         }}
@@ -148,7 +130,7 @@ export default async function Blog({ params }) {
         </Suspense> */}
       </div>
       <article className="prose prose-quoteless prose-neutral dark:prose-invert">
-        {/* <CustomMDX source={post.content} /> */}
+        <CustomMDX {...source} />
       </article>
     </section>
   );
