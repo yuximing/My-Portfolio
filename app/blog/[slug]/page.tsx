@@ -82,7 +82,7 @@ function formatDate(date: string) {
     year: 'numeric',
   });
 
-  return `${fullDate} (${formattedDate})`;
+  return `${fullDate}`;
 }
 
 export default async function Blog({ params }) {
