@@ -12,198 +12,147 @@ The pipeline pattern is a common concurrency pattern in Go that allows you to ef
 The common pattern for each stage:
 ... -- (inbound chan) --- values ---> [perform some function on the data] --- values ---> (outbound chan) -- ...
 
-You can go surprisingly far with just Node.js and JavaScript. You'll notice a theme start to emerge in this blog post: fewer dependencies, and more copy/paste-able code.
-
-I removed the following libraries:
-
-- `contentlayer`
-- `next-contentlayer`
-- `rehype-autolink-headings`
-- `rehype-pretty-code`
-- `rehype-slug`
-- `remark-gfm`
-- `shiki`
-
-I was still able to maintain almost all of my content requirements with not much code. For example, here's how I'm able to retrieve all of my blog posts:
-```
-import fs from 'fs';
-import path from 'path';
-
-function getMDXFiles(dir) {
-  return fs.readdirSync(dir).filter((file) => path.extname(file) === '.mdx');
-}
-
-function readMDXFile(filePath) {
-  let rawContent = fs.readFileSync(filePath, 'utf-8');
-  return parseFrontmatter(rawContent);
-}
-
-function getMDXData(dir) {
-  let mdxFiles = getMDXFiles(dir);
-  return mdxFiles.map((file) => {
-    let { metadata, content } = readMDXFile(path.join(dir, file));
-    let slug = path.basename(file, path.extname(file));
-    return {
-      metadata,
-      slug,
-      content,
-    };
-  });
-}
-
-export function getBlogPosts() {
-  return getMDXData(path.join(process.cwd(), 'content'));
-}
-```
-
-That's not too bad. So what am I missing? Well, Contentlayer gives you Fast Refresh for your content. That's nice. You can [workaround this](https://github.com/gaearon/overreacted.io/pull/797) or just use `@next/mdx`, which I might do. Contentlayer has other features, too, but they're unnecessary for my blog.
-
-### Remark and Rehype
-
-What about the AST modifications for auto-linking headings, adding IDs, and supporting syntax highlighting? I don't know why I didn't think of this before, but you can just… use React components.
+### Example: Squaring Numbers
+Consider a pipeline with three stages.
+The first stage, `gen`, is a function that converts a list of integers to a channel that emits the integers in the list:
 
 ```jsx
-import { highlight } from 'sugar-high'; // 1KB new dependency
-
-// This replaces rehype-pretty-code and shiki
-function Code({ children, ...props }) {
-  let codeHTML = highlight(children);
-  return <code dangerouslySetInnerHTML={{ __html: codeHTML }} {...props} />;
-}
-
-// This replaces rehype-slug
-function slugify(str) {
-  return str
-    .toString()
-    .toLowerCase()
-    .trim() // Remove whitespace from both ends of a string
-    .replace(/\s+/g, '-') // Replace spaces with -
-    .replace(/&/g, '-and-') // Replace & with 'and'
-    .replace(/[^\w\-]+/g, '') // Remove all non-word characters except for -
-    .replace(/\-\-+/g, '-'); // Replace multiple - with single -
-}
-
-// This replaces rehype-autolink-headings
-function createHeading(level) {
-  return ({ children }) => {
-    let slug = slugify(children);
-    return React.createElement(
-      `h${level}`,
-      { id: slug },
-      [
-        React.createElement('a', {
-          href: `#${slug}`,
-          key: `link-${slug}`,
-          className: 'anchor',
-        }),
-      ],
-      children
-    );
-  };
+func gen(nums ...int) <-chan int {
+    out := make(chan int)
+    go func() {
+        for _, n := range nums {
+            out <- n
+        }
+        close(out)
+    }()
+    return out
 }
 ```
-
-Oh and that `remark-gfm` I was using for the GitHub style Markdown tables? Again, you can use a React component for that.
+The second stage, `sq`, receives integers from a channel and returns a channel that emits the square of each received integer. After the inbound channel is closed and this stage has sent all the values downstream, it closes the outbound channel:
+```jsx
+func sq(in <-chan int) <-chan int {
+    out := make(chan int)
+    go func() {
+        for n := range in {
+            out <- n * n
+        }
+        close(out)
+    }()
+    return out
+}
+```
+<Callout>
+Note: The go routine inside does not block the function that spawns it. Two go routines run synchronously because of the unbuffered channel. The sender blocks until there is a corresponding receive operation. When the in channel is closed (which "range" is waiting on), the receiver's loop stops.
+</Callout>
+The `main` function sets up the pipeline and runs the final stage: it receives values from the second stage and prints each one, until the channel is closed:
 
 ```jsx
-function Table({ data }) {
-  let headers = data.headers.map((header, index) => (
-    <th key={index}>{header}</th>
-  ));
-  let rows = data.rows.map((row, index) => (
-    <tr key={index}>
-      {row.map((cell, cellIndex) => (
-        <td key={cellIndex}>{cell}</td>
-      ))}
-    </tr>
-  ));
+func main() {
+    // Set up the pipeline.
+    c := gen(2, 3)
+    out := sq(c)
 
-  return (
-    <table>
-      <thead>
-        <tr>{headers}</tr>
-      </thead>
-      <tbody>{rows}</tbody>
-    </table>
-  );
+    // Consume the output.
+    fmt.Println(<-out) // 4
+    fmt.Println(<-out) // 9
 }
 ```
-
-### Dependency Minimalism
-
-Why go through all of this work to delete dependencies?
-
-After having a blog for 10 years, I've gained a new appreciation for keeping things simple. Now, I'm not going _full_ minimalist here. I still want nice things. But I'm taking more opportunities to simplify and keep more code managed in the repo.
-
-Shoutout to [next-mdx-remote](https://github.com/hashicorp/next-mdx-remote) and [react-tweet](https://react-tweet.vercel.app/).
-
-## Performance
-
-Earlier this year, I moved this blog to the [Next.js App Router](https://nextjs.org/docs/app). That came with a subtle but important change: [React Server Components](https://nextjs.org/docs/app/building-your-application/rendering/server-components) by default.
-
-### Server Components
-
-Server Components are fun. For example, I can embed tweets inside blog posts:
+Since `sq` has the same type for its inbound and outbound channels, we can compose it any number of times. We can also rewrite `main` as a range loop, like the other stages:
 
 ```jsx
-<Tweet id="1457032789883187201" />
+func main() {
+    // Set up the pipeline and consume the output.
+    for n := range sq(sq(gen(2, 3))) {
+        fmt.Println(n) // 16 then 81
+    }
+}
 ```
 
-The `Tweet` component handles both data fetching _and_ creating UI, all bundled up in a handy npm package (worth an exception here). Notably, additional Server Components added to my pages aren't increasing the client-side JavaScript bundle. This “templating” remains server-only.
+### Fan-out & Fan-in
+Fan-out refers to the process of distributing work across multiple goroutines or workers to perform tasks concurrently. Tasks are usually distributed across workers through a channel.
 
-Another example is on [my work page](https://leerob.io/work). I love that I can drop this component in anywhere:
+Fan-in is the opposite of fan-out and refers to the process of consolidating or combining the results from multiple workers into a single result. Each worker goroutine usually has its own channel to send the results back to the main goroutine. The main goroutine receives the results by multiplexing all worker channels onto a single channel which contains the final result.
+
+### Example: Squaring Numbers (cont'd)
+
+Change the pipeline to run two instances of `sq`, each reading from the same input channel. Introduce a new function, merge, to fan in the results:
+```jsx
+func main() {
+    in := gen(2, 3)
+
+    // Distribute the sq work across two goroutines that both read from in.
+    c1 := sq(in)
+    c2 := sq(in)
+
+    // Consume the merged output from c1 and c2.
+    for n := range merge(c1, c2) {
+        fmt.Println(n) // 4 then 9, or 9 then 4
+    }
+}
+```
+- Distribute the squaring work to two goroutines to run concurrently (fan-out)
+- Used a merge function to fan-in the results into one result and loop through it to print them out
+
+The `merge` function converts a list of channels to a single channel by starting a goroutine for each inbound channel that copies the values to the sole outbound channel. Once all the `output` goroutines have been started, `merge` starts one more goroutine to close the outbound channel after all sends on that channel are done.
+
+Sends on a closed channel panic, so it’s important to ensure all sends are done before calling close. The `sync.WaitGroup` type provides a simple way to arrange this synchronization:
+```jsx
+func merge(cs ...<-chan int) <-chan int {
+    var wg sync.WaitGroup
+    out := make(chan int)
+
+    // Start an output goroutine for each input channel in cs.  output// copies values from c to out until c is closed, then calls wg.Done.
+    output := func(c <-chan int) {
+        for n := range c {
+            out <- n
+        }
+        wg.Done()
+    }
+    wg.Add(len(cs))
+    for _, c := range cs {
+        go output(c)
+    }
+
+    // Start a goroutine to close out once all the output goroutines are// done.  This must start after the wg.Add call.
+    // It does not block the function merge, which will let it return out and proceed execution with whatever is in there already
+    go func() {
+        wg.Wait()
+        close(out)
+    }()
+    return out
+}
+```
+
+### Stopping short
+There is a pattern to our pipeline functions:
+- stages close their outbound channels when all the send operations are done. (`close(out)`)
+- stages keep receiving values from inbound channels until those channels are closed. (`for n := range in` in `sq`)
+
+This pattern allows each receiving stage to be written as a `range` loop and ensures that all goroutines exit once all values have been successfully sent downstream.
+
+But in real pipelines, stages don’t always receive all the inbound values. Sometimes this is by design: the receiver may only need a subset of values to make progress. More often, a stage exits early because an inbound value represents an error in an earlier stage. In either case the receiver should not have to wait for the remaining values to arrive, and we want earlier stages to stop producing values that later stages don’t need.
+
+In our example pipeline, if a stage fails to consume all the inbound values, the goroutines attempting to send those values will block indefinitely:
 
 ```jsx
-async function Stars() {
-  let res = await fetch('https://api.github.com/repos/vercel/next.js');
-  let json = await res.json();
-  let count = Math.round(json.stargazers_count / 1000);
-  return `${count}k stars`;
+    // Consume the first value from the output.
+    out := merge(c1, c2)
+    fmt.Println(<-out) // 4 or 9
+    return
+    // Since we didn't receive the second value from out,
+    // one of the output goroutines is hung attempting to send it.
 }
 ```
 
-### Partial Prerendering
+This is a resource leak: goroutines consume memory and runtime resources, and heap references in goroutine stacks keep data from being garbage collected. Goroutines are not garbage collected; they must exit on their own.
 
-We're also working on something new in Next.js I'm now using here. It enables Next.js to prerender as much of the page as possible to static, leaving holes for dynamic components.
-
-For example, 98% of this blog post page is work that can be prerendering during the build. However, those view counts at the top of the page should be dynamic on every request. With [Partial Prerendering](https://www.partialprerendering.com/), the code for that looks like:
-
-```tsx
-async function Views({ slug }: { slug: string }) {
-  let views = await getViewsCount();
-  incrementViews(slug);
-  // ...
-}
-
-export default function Blog({ params }) {
-  let post = getBlogPosts().find((post) => post.slug === params.slug);
-  // ...
-
-  return (
-    <section>
-      <Suspense fallback={<p className="h-5" />}>
-        <Views slug={post.slug} />
-      </Suspense>
-      <article>{post.content}</article>
-    </section>
-  );
-}
-```
-
-Everything up to the `Suspense` boundary, including the `fallback`, can be prerendered. Then, when the request happens, the static shell is instantly shown, followed by the dynamic content (views) streaming in after the fact.
-
-`getViewsCount` signals to Next.js that it's dynamic through `noStore()`:
+We need to arrange for the upstream stages of our pipeline to exit even when the downstream stages fail to receive all the inbound values. One way to do this is to change the outbound channels to have a buffer. A buffer can hold a fixed number of values; send operations complete immediately if there’s room in the buffer:
 
 ```jsx
-export async function getViewsCount() {
-  noStore();
-  let data = await sql`
-    SELECT slug, count
-    FROM views
-  `;
-
-  return data.rows as { slug: string; count: number }[];
-}
+c := make(chan int, 2) // buffer size 2
+c <- 1  // succeeds immediately
+c <- 2  // succeeds immediately
+c <- 3  // blocks until another goroutine does <-c and receives 1
 ```
 
 And `incrementViews` is a Server Action that can be called like any JavaScript function:
@@ -223,30 +172,154 @@ export async function increment(slug: string) {
 }
 ```
 
-I'm really happy with this approach. In the past, I had to include more dependencies like `swr` and add additional client-side JavaScript to achieve this. Partial Prerendering feels fast, without giving up the dynamic view counts that I love.
+When the number of values to be sent is known at channel creation time, a buffer can simplify the code. For example, we can rewrite `gen` to copy the list of integers into a buffered channel and avoid creating a new goroutine:
 
+```jsx
+func gen(nums ...int) <-chan int {
+    out := make(chan int, len(nums))
+    for _, n := range nums {
+        out <- n
+    }
+    close(out)
+    return out
+}
+```
 
-## Opinions
+Returning to the blocked goroutines in our pipeline, we might consider adding a buffer to the outbound channel returned by `merge`:
 
-There's an assortment of other opinions I've included here now:
+```jsx
+func merge(cs ...<-chan int) <-chan int {
+    var wg sync.WaitGroup
+    out := make(chan int, 1) // enough space for the unread inputs
+    // ... the rest is unchanged ...
+```
+While this fixes the blocked goroutine in this program, this is bad code. The choice of buffer size of 1 here depends on knowing the number of values `merge` will receive and the number of values downstream stages will consume. This is fragile: if we pass an additional value to `gen`, or if the downstream stage reads any fewer values, we will again have blocked goroutines.
 
-- **Prefer `let` over `const`:** It's fewer characters to write. I'm lazy. Also, this isn't a production codebase here or anything. [Nice post here](https://overreacted.io/on-let-vs-const/) on this topic.
-- **Prefer copy/paste over the wrong abstraction:** I removed `date-fns`, `clsx` / `classnames`, and `gray-matter` for simple copy-pastable alternatives. Sure, they don't support every single feature. But, I don't need it. And if I do later, maybe I'll bring it back.
-- **Prefer loading SVGs as images:** Okay, this one has been hard for me. I've gotten so used to inlining SVGs in React. But starting to change my mind. [Related reading here](https://kurtextrem.de/posts/svg-in-js) and [on svg sprites](https://benadam.me/thoughts/react-svg-sprites/).
-- **Prefer larger files versus many components:** Just works for my brain better. Keep code that changes often close together. Your mileage may vary.
-- **Prefer colocating most things in `app/`:** Because, _why not_? Now that it's possible with the App Router I'm probably overusing this, but it feels nice.
-- **Prefer colocating styles with components:** Okay, I've been using Tailwind now for many years, but this is still worth mentioning. Similar to my content evolution, I went from CSS → Sass → styled-components → Chakra → Tailwind. [Give it a shot](https://adamwathan.me/css-utility-classes-and-separation-of-concerns). P.S. LLMs are very good at Tailwind.
+Instead, we need to provide a way for downstream stages to indicate to the senders that they will stop accepting input.
 
-## Conclusion
+## Cancellation
 
-As always, my entire site is [open source](https://github.com/leerob/leerob.io). Feel free to fork it and hack around.
+### Explicit cancellation - the done channel
 
-I've also simplified the cloning process by consolidating everything to a single [Postgres database](https://vercel.com/postgres). It's now where blog views, guestbook entries, and redirects are stored. I still like MySQL, just wanted an excuse to use Vercel Postgres more.
+The main idea is that, when the downstream stages decide to exit, we want it to tell the goroutines in the upstream stages to abandon the values they’re trying to send. We can do it by sending values on a channel called `done`. It sends two values since there are potentially two blocked senders:
 
-See you next year for the 2024 blog refresh 🫡
+```jsx
+func main() {
+    in := gen(2, 3)
 
----
+    // Distribute the sq work across two goroutines that both read from in.
+    c1 := sq(in)
+    c2 := sq(in)
 
-¹: Even when I moved to a CMS, I was still writing in MDX. For my developer blog, it's by far the easiest for me to maintain. I've gone the opposite route with custom components backed by a CMS on larger projects, but has always felt unnecessary here.
+    // Consume the first value from output.
+    done := make(chan struct{}, 2) // the channel type must have some element type
+    out := merge(done, c1, c2)
+    fmt.Println(<-out) // 4 or 9
+    // Tell the remaining senders we're leaving.
+    done <- struct{}{}
+    done <- struct{}{}
+}
+```
 
-²: Surprisingly, there still aren't many great git-like workflows for content that I've enjoyed using. Again, for my blog, having the complete version history tracked in git has been very helpful.
+```jsx
+func merge(done <-chan struct{}, cs ...<-chan int) <-chan int {
+    var wg sync.WaitGroup
+    out := make(chan int)
+
+    // Start an output goroutine for each input channel in cs.  output
+    // copies values from c to out until c is closed or it receives a value
+    // from done, then output calls wg.Done.
+    output := func(c <-chan int) {
+        for n := range c {
+            select {
+            case out <- n:
+            case <-done:
+            }
+        }
+        wg.Done()
+    }
+    // ... the rest is unchanged ...
+```
+
+The sending goroutines from `merge` replace their send operation with a `select` statement that proceeds either when the send on `out` happens(which indicates that there is a receiver ready to receive) or when they receive a value from `done`. The value type of `done` is the empty struct because the value doesn’t matter: it is the receive event that indicates the send on `out` should be abandoned. The `output` goroutines continue looping on their inbound channel, `c`, so the upstream stages are not blocked. (We’ll discuss in a moment how to allow this loop to return early.)
+
+This approach has a problem: each downstream receiver needs to know the number of potentially blocked upstream senders and arrange to signal those senders on early return. Keeping track of these counts is tedious and error-prone.
+
+We need a way to tell an unknown and unbounded number of goroutines to stop sending their values downstream. In Go, we can do this by closing a channel, because a receive operation on a closed channel can always proceed immediately, yielding the element type’s zero value.
+
+Sending empty structs as signal to done chan -> close the done chan
+
+This means that `main` can unblock all the senders simply by closing the `done` channel. This close is effectively a broadcast signal to the senders. We extend each of our pipeline functions to accept `done` as a parameter and arrange for the close to happen via a `defer` statement, so that all return paths from `main` will signal the pipeline stages to exit.
+
+```jsx
+func main() {
+    // Set up a done channel that's shared by the whole pipeline,
+    // and close that channel when this pipeline exits, as a signal
+    // for all the goroutines we started to exit.
+    done := make(chan struct{})
+    defer close(done)          
+
+    in := gen(done, 2, 3)
+
+    // Distribute the sq work across two goroutines that both read from in.
+    c1 := sq(done, in)
+    c2 := sq(done, in)
+
+    // Consume the first value from output.
+    out := merge(done, c1, c2)
+    fmt.Println(<-out) // 4 or 9
+    // done will be closed by the deferred call.      
+}
+```
+
+Each of our pipeline stages is now free to return as soon as `done` is closed. The `output` routine in `merge` can return without draining its inbound channel, since it knows the upstream sender, `sq`, will stop attempting to send when `done` is closed. `output` ensures `wg.Done` is called on all return paths via a `defer` statement:
+
+```jsx
+func merge(done <-chan struct{}, cs ...<-chan int) <-chan int {
+    var wg sync.WaitGroup
+    out := make(chan int)
+
+    // Start an output goroutine for each input channel in cs.  output// copies values from c to out until c or done is closed, then calls// wg.Done.
+    output := func(c <-chan int) {
+        defer wg.Done()
+        for n := range c {
+            select {
+            case out <- n:
+            case <-done:
+                return
+            }
+        }
+    }
+    // ... the rest is unchanged ...
+```
+
+Similarly, `sq` can return as soon as `done` is closed. `sq` ensures its `out` channel is closed on all return paths via a `defer` statement:
+```jsx
+func sq(done <-chan struct{}, in <-chan int) <-chan int {
+    out := make(chan int)
+    go func() {
+        defer close(out)
+        for n := range in {
+            select {
+            case out <- n * n:
+            case <-done:
+                return
+            }
+        }
+    }()
+    return out
+}
+```
+
+Here are the guidelines for pipeline construction:
+- stages close their outbound channels when all the send operations are done.
+- stages keep receiving values from inbound channels until those channels are closed or the senders are unblocked.
+
+Pipelines unblock senders either by ensuring there’s enough buffer for all the values that are sent or by explicitly signalling senders when the receiver may abandon the channel.
+
+### Parallelism
+
+The pipeline pattern enables parallelism by allowing multiple stages to execute concurrently. As soon as a stage finishes processing a piece of data, it can immediately start processing the next one, without waiting for the entire pipeline to complete.
+
+## References
+[Go Concurrency Patterns: Pipelines and cancellation](https://go.dev/blog/pipelines)
