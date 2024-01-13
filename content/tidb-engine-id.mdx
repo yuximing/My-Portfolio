@@ -1,0 +1,127 @@
+---
+title: 'How TiDB Lightning Allocates Engine IDs'
+publishedAt: '2023-07-10'
+summary: 'How TiDB Lightning Allocates Engine IDs'
+---
+
+## Code structure
+In `tidb/br/pkg/lightning/importer/import.go`, function `importTables()` calls function `importTable()` to process individual table imports. Function `importTable()` is defined in `tidb/br/pkg/lightning/importer/table_import.go`. `importTable()` does the following 3 things: load the table info; restore engines (if still needed) and post-process. During the first step (load the table info), function `populateChunks()` is called, within which `MakeTableRegions()` is called to create table regions. We will analyze from here. 
+
+## TableRegion Struct Definition
+```jsx
+// tidb/br/pkg/lightning/mydump/region.go
+// TableRegion contains information for a table region during import.
+type TableRegion struct {
+    EngineID int32
+    DB         string
+    Table      string
+    FileMeta   SourceFileMeta
+    ExtendData ExtendColumnData
+    Chunk Chunk
+}
+```
+## Code Analysis
+
+`MakeTableRegions()`(defined in `tidb/br/pkg/lightning/mydump/region.go`) divides a table's data into table regions. Each table region will be processed by an engine independently to efficiently import data into TiDB.
+
+In `MakeTableRegions()`, `AllocateEngineIDs()` is called to generate the engine IDs for each table region.
+[https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/mydump/region.go#L323](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/mydump/region.go#L323)
+```jsx
+// tidb/br/pkg/lightning/mydump/region.go
+filesRegions := make([]*TableRegion, 0, len(meta.DataFiles))
+dataFileSizes := make([]float64, 0, len(meta.DataFiles))
+// rebase row-id for all chunk
+rowIDBase := int64(0)
+for _, dataFile := range meta.DataFiles {
+    fileRegionsRes := fileRegionsMap[dataFile.FileMeta.Path]
+    for _, region := range fileRegionsRes.regions {
+        region.Chunk.PrevRowIDMax += rowIDBase
+        region.Chunk.RowIDMax += rowIDBase
+    }
+    filesRegions = append(filesRegions, fileRegionsRes.regions...)
+    dataFileSizes = append(dataFileSizes, fileRegionsRes.sizes...)
+    rowIDBase = fileRegionsRes.regions[len(fileRegionsRes.regions)-1].Chunk.RowIDMax
+}
+
+batchSize := CalculateBatchSize(float64(cfg.EngineDataSize), meta.IsRowOrdered, float64(meta.TotalSize))
+
+log.FromContext(ctx).Info("makeTableRegions", zap.Int("filesCount", len(meta.DataFiles)),
+    zap.Int64("MaxChunkSize", cfg.MaxChunkSize),
+    zap.Int("RegionsCount", len(filesRegions)),
+    zap.Float64("BatchSize", batchSize),
+    zap.Duration("cost", time.Since(start)))
+AllocateEngineIDs(filesRegions, dataFileSizes, batchSize, cfg.BatchImportRatio, float64(cfg.EngineConcurrency))
+```
+
+`AllocateEngineIDs()` takes 5 parameters:
+`filesRegions` - a slice of pointers to `TableRegion` objects;
+`dataFileSizes` - a slice of float64, each element is the data file size of the file region in the corresponding index of the slice `filesRegions`
+`batchSize`, `batchImportRatio`, `engineConcurrency` - three float64 to assist in the computation of the total number of engines required
+It first calculates the total data file size by adding up the sizes of all data files. If the total data file size is smaller or equal to the batch size, there is no need for batching, the function returns.
+```jsx
+// tidb/br/pkg/lightning/mydump/region.go
+func AllocateEngineIDs(
+    filesRegions []*TableRegion,
+    dataFileSizes []float64,
+    batchSize float64,
+    batchImportRatio float64,
+    engineConcurrency float64,
+) {
+    
+    totalDataFileSize := 0.0
+    for _, dataFileSize := range dataFileSizes {
+        totalDataFileSize += dataFileSize
+    }
+
+    // No need to batch if the size is too small :)
+    if totalDataFileSize <= batchSize {
+        return
+    }
+```
+
+If batching is needed, the function uses a brute-force search algorithm to calculate the number of engines needed to achieve the desired batch import ratio.
+```jsx
+ratio := totalDataFileSize * (1 - batchImportRatio) / batchSize
+n := math.Ceil(ratio)
+logGammaNPlusR, _ := math.Lgamma(n + batchImportRatio)
+logGammaN, _ := math.Lgamma(n)
+logGammaR, _ := math.Lgamma(batchImportRatio)
+invBetaNR := math.Exp(logGammaNPlusR - logGammaN - logGammaR) // 1/B(N, R) = Γ(N+R)/Γ(N)Γ(R)
+for {
+    if n <= 0 || n > engineConcurrency {
+        n = engineConcurrency
+        break
+    }
+    realRatio := n - invBetaNR
+    if realRatio >= ratio {
+        // we don't have enough engines. reduce the batch size to keep the pipeline smooth.
+        curBatchSize = totalDataFileSize * (1 - batchImportRatio) / realRatio
+        break
+    }
+    invBetaNR *= 1 + batchImportRatio/n // Γ(X+1) = X * Γ(X)
+    n += 1.0
+}
+```
+After that, the function iterates over the `dataFileSizes` along with the corresponding `filesRegions` to assign engine IDs. `curEngineID` is initialized to 0. For each data file, it assigns the `curEngineID` to it by storing the `curEngineID` value to the EngineID field of the corresponding `TableRegion` object.
+
+In each iteration, `curEngineSize` is updated by adding the current data file size to it. The function checks if the accumulated size of the current engine has reached or exceeded the current batch size. If so, it resets `curEngineSize` to zero and increments `curEngineID` so that in the next iteration, a new engine ID will be assigned to the corresponding file region. Additionally, batch size will be recalculated.
+```jsx
+for i, dataFileSize := range dataFileSizes {
+    filesRegions[i].EngineID = curEngineID
+    curEngineSize += dataFileSize
+
+    if curEngineSize >= curBatchSize {
+        curEngineSize = 0
+        curEngineID++
+
+        i := float64(curEngineID)
+        // calculate the non-uniform batch size
+        if i >= n {
+            curBatchSize = batchSize
+        } else {
+            // B_(i+1) = B_i * (I/W/(N-i) + 1)
+            curBatchSize *= batchImportRatio/(n-i) + 1.0
+        }
+    }
+}
+```

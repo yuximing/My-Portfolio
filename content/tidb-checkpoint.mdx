@@ -1,0 +1,316 @@
+---
+title: 'TiDB Lightning Checkpoint Mechanism Source Code Explained'
+publishedAt: '2023-09-09'
+summary: 'TiDB Lightning Checkpoint Mechanism Source Code Explained'
+---
+
+## Introduction
+
+TiDB Lightning facilitates high-speed and parallel data import from various sources into the TiDB database. Importing large-scale data can be time-consuming, possibly spanning hours or days, and unexpected disruptions can result in inconvenience. TiDB uses checkpoints to preserve import progress so that it can resume the process from the point of interruption. In this article, we will explore how checkpoints are managed and implemented in TiDB Lightning. The analysis is based on TiDB v7.1.0.
+
+## High-Level Workflow
+
+The lightning import process is managed by an import controller. Upon its initial setup, a checkpoint database is either created or designated. After that, the remaining import procedures are driven by the controller's method Run(), encompassing seven essential steps: `setGlobalVariables`, `restoreSchema`, `preCheckRequirements`, `initCheckpoint`, `importTables`, `fullCompact` and `cleanCheckpoints`.
+
+The `initCheckpoint` stage initializes the checkpoint structures and information. Within this phase, a goroutine is spawned to listen to checkpoint updates throughout the import process. In the `importTables` phase, more detailed checkpoint data is incorporated into the checkpoint database as tables are imported. After the import is completed, cleanup work is done in the `cleanCheckpoints` stage. Checkpoints are either removed from the checkpoint database or kept depending on the configuration.
+
+## Checkpoint Data Structures Hierarchy
+
+The checkpoint management infrastructure has four primary data structures : `TaskCheckpoint`, `TableCheckpoint`, `EngineCheckpoint` and `ChunkCheckpoint`.
+
+`TaskCheckpoint` contains information about the ongoing import task, such as task ID, importer's address, TiDB host, TiDB port, PD's Address, and others. These values are specified in the lighting's configuration file.
+
+`TableCheckpoint` captures table-specific information, like table ID, TableInfo, and most importantly, a map of engine ID to `EngineCheckpoint` struct. `EngineCheckpoint` holds an array of `ChunkCheckpoint` structs. `ChunkCheckpoint` links to the actual `Chunk` struct.
+
+```jsx
+type TaskCheckpoint struct {
+    TaskID       int64
+    SourceDir    string
+    Backend      string
+    ImporterAddr string
+    TiDBHost     string
+    TiDBPort     int
+    PdAddr       string
+    SortedKVDir  string
+    LightningVer string
+}
+
+type TableCheckpoint struct {
+    Status    CheckpointStatus
+    AllocBase int64
+    Engines   map[int32]*EngineCheckpoint
+    TableID   int64
+    TableInfo *model.TableInfo
+    Checksum verify.KVChecksum
+}
+
+type EngineCheckpoint struct {
+    Status CheckpointStatus
+    Chunks []*ChunkCheckpoint
+}
+
+type ChunkCheckpoint struct {
+    Key               ChunkCheckpointKey
+    FileMeta          mydump.SourceFileMeta
+    ColumnPermutation []int
+    Chunk             mydump.Chunk
+    Checksum          verify.KVChecksum
+    Timestamp         int64
+}
+```
+
+The status of the checkpoint is defined as an integer. As the value increases, it indicates the possible 13 states a checkpoint can be in, ranging from "missing" to "analyzed."
+
+```jsx
+type CheckpointStatus uint8
+const (
+    CheckpointStatusMissing         CheckpointStatus = 0
+    CheckpointStatusMaxInvalid      CheckpointStatus = 25
+    CheckpointStatusLoaded          CheckpointStatus = 30
+    CheckpointStatusAllWritten      CheckpointStatus = 60
+    CheckpointStatusClosed          CheckpointStatus = 90
+    CheckpointStatusImported        CheckpointStatus = 120
+    CheckpointStatusIndexImported   CheckpointStatus = 140
+    CheckpointStatusAlteredAutoInc  CheckpointStatus = 150
+    CheckpointStatusChecksumSkipped CheckpointStatus = 170
+    CheckpointStatusChecksummed     CheckpointStatus = 180
+    CheckpointStatusIndexAdded      CheckpointStatus = 190
+    CheckpointStatusAnalyzeSkipped  CheckpointStatus = 200
+    CheckpointStatusAnalyzed        CheckpointStatus = 210
+)
+```
+
+## Source Code Analysis
+
+### Checkpoint Initialization
+
+#### Initialize Checkpoint Storage File/MySQL Database
+
+TiDB Lightning offers the flexibility of choosing either a local file or a remote MySQL-compatible database for checkpoint storage. This selection is made based on the configuration file. The storage file or database is generated or specified as `checkpointsDB` when the import controller is initialized. `checkpointsDB` is a field of the controller.
+
+The creation of the import controller is managed by the `NewImportController()` function, which in turn invokes `NewImportControllerWithPauser()` to execute the necessary actions.
+
+[NewImportControllerWithPauser()](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/import.go#L286) first checks if there is already a `CheckpointStorage`. If such storage exists, the provided external storage is used as the `checkpointDB`; if not, function `OpenCheckPointsDB()` is called to generate a new checkpoint DB.
+
+[OpenCheckpointsDB()](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/checkpoints/checkpoints.go#L587) uses a switch statement to check the designated DB type outlined in the config (config.CheckpointDriverMySQL/config.CheckpointDriverFile), then creates and returns the appropriate new `checkpointsDB` instance.
+
+#### Initialize Checkpoint Management Structure in Checkpoint DB
+
+[initCheckpoint()](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/import.go#L841) is a method of the import controller. It handles checkpoint initialization. It calls `checkpointsDB`'s method `Initialize()` to initialize the checkpoint data for all tables.
+
+`checkpointsDB` is a field of the `Controller` of type `checkpoints.DB`. DB is an interface defined in [here](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/checkpoints/checkpoints.go#L561). It has some important checkpoint-related methods, like `Initialize()`, `Get()`, `Update()`, `RemoveCheckpoint()`, etc. There are two structures that implement the DB interface: `MySQLCheckpointsDB` and `FileCheckpointsDB`. Here we are going to discuss `FileCheckpointsDB`'s implementation.
+
+Struct `FileCheckpointsDB` has a field called checkpoints, which is of the type of struct `CheckpointsModel` defined in [here](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/checkpoints/checkpointspb/file_checkpoints.pb.go#L27). CheckpointsModel has two fields: Checkpoints, a map of strings as keys and pointers to `TableCheckpointModel` object as values; `TaskCheckpoint`, pointer to `TaskCheckpointModel` object.
+
+```jsx
+type FileCheckpointsDB struct {
+    lock        sync.Mutex
+    checkpoints checkpointspb.CheckpointsModel
+    ctx         context.Context
+    path        string
+    fileName    string
+    exStorage   storage.ExternalStorage
+}
+
+type CheckpointsModel struct {
+    Checkpoints    map[string]*TableCheckpointModel
+    TaskCheckpoint *TaskCheckpointModel
+}
+
+type TableCheckpointModel struct {
+    Hash       []byte     
+    Status     uint32     
+    AllocBase  int64       
+    Engines    map[int32]*EngineCheckpointModel
+    TableID    int64
+    KvBytes    uint64
+    KvKvs      uint64
+    KvChecksum uint64
+    TableInfo  []byte
+}
+```
+
+`Initialize()` first creates a `TaskCheckpointModel` with values sourced from the configuration file. Then, for each table within each database for import, it generates a `TableCheckpointModel`. One of the fields in this model is `Engines`, represented as a map with int32 as keys and pointers to `EngineCheckpointModel` as values. In the end, the `save()` function is called to store the structured models into the storage file.
+
+This step establishes the checkpoint structure; specific checkpoint data isn't integrated at this stage. The XXXModel structures serve as the means by which content is organized and stored in `FileCheckpointsDB`. The live checkpoint data resides within the XXX structures introduced in the Data Structures Hierarchy, and will be inserted into [FileCheckpointsDB](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/checkpoints/checkpoints.go#L1222) when appropriate.
+
+#### Engine and Chunk Checkpoints Initialization
+
+After the initialization of the checkpoint storage and data structures, `rc.importTables()` starts importing data. For each table, `importTable()` is called, within which `populateChunks()` is called to populate the chunk details, including checkpoints for chunks.
+
+`populateChunks()` first invokes `MakeTableRegions()` to generate table regions and allocate engine IDs for each region. A single table may be divided into multiple table regions, which may be processed by different engines. So a map of these engines' checkpoints is maintained for tracking and restoration. One or more regions can be assigned to an engine depending on the configuration. `MakeTableRegions()` returns a slice of pointers to the `TableRegion` object.
+
+After `MakeTableRegions()` is executed, if no errors are generated, `populateChunks()` begins processing the generated table regions to sort out all kinds of checkpoint information. For each region, the following steps are performed:
+
+First, it checks if an engine checkpoint exists for the engine ID linked to each region. `cp.Engines` is a map with int32 as keys and pointers to `EngineCheckpoint` object as values. If absent, an engine checkpoint is created and added to the map.
+
+```jsx
+func (tr *TableImporter) populateChunks(ctx context.Context, rc *Controller, cp *checkpoints.TableCheckpoint) error {
+    
+    engine, found := cp.Engines[region.EngineID]
+    if !found {
+        engine = &checkpoints.EngineCheckpoint{
+            Status: checkpoints.CheckpointStatusLoaded,
+        }
+        cp.Engines[region.EngineID] = engine
+    }
+    // ...
+```
+
+Second, `ChunkCheckpoint` is created with detailed information about each region and appended to the array of pointers to `ChunkCheckpoint` objects for the current engine. Recall that `EngineCheckpoint` has a field called `Chunks`, which is a slice of pointers to `ChunkCheckpoint`.
+
+```jsx
+ccp := &checkpoints.ChunkCheckpoint{
+    Key: checkpoints.ChunkCheckpointKey{
+        Path:   region.FileMeta.Path,
+        Offset: region.Chunk.Offset,
+    },
+    FileMeta:          region.FileMeta,
+    ColumnPermutation: nil,
+    Chunk:             region.Chunk,
+    Timestamp:         timestamp,
+}
+engine.Chunks = append(engine.Chunks, ccp)
+```
+
+Finally, after traversing all table regions, an index engine checkpoint is added to the `EngineCheckpoint` map.
+
+```jsx
+cp.Engines[common.IndexEngineID] = &checkpoints.EngineCheckpoint{Status: checkpoints.CheckpointStatusLoaded}
+```
+
+Source code link: [https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/table_import.go#L218](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/table_import.go#L218)
+
+#### Insert Engine and Chunk checkpoints into DB
+
+In `importTable()`, after populating chunks and some other steps for table import, `InsertEngineCheckpoints()` inserts the checkpoint data acquired from `populateChunks()` to the data structures in `FileCheckpointsDB`. Then, the completed table checkpoint information will be broadcast.
+
+```jsx
+if err := rc.checkpointsDB.InsertEngineCheckpoints(ctx, tr.tableName, cp.Engines); err != nil {
+    return false, errors.Trace(err)
+}
+web.BroadcastTableCheckpoint(tr.tableName, cp)
+```
+
+[InsertEngineCheckpoints()](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/checkpoints/checkpoints.go#L1363) executes the following steps:
+
+1. Acquire mutex lock of `FileCheckpointsDB`
+
+2. Get the table model in `FileCheckpointsDB`
+
+3. Go through the map of `EngineCheckpoint` pointers, create `EngineCheckpointModel` for each engine, create `ChunkCheckpointModel` for all chunks associated with each engine, and save the `EngineCheckpointModel` to the table model
+
+4. Call `save()` to write the above changes to the storage file.
+
+5. Release mutex lock
+
+### Checkpoint Updates
+
+In the method `initCheckpoint()`, after initialization, a goroutine is launched using the function call `listenCheckpointUpdates()`. This goroutine is designed to monitor checkpoint updates and merge multiple checkpoints together to reduce database load.
+
+`listenCheckpointUpdates()` creates a map called `coalesed`, where the keys correspond to table names, and the associated values are pointers to `TableCheckpointDiff` objects that store the checkpoint details for respective tables. This variable is used to group the checkpoint updates for the same table in order to reduce the number of database updates, hence, improve the overall performance.
+
+The function also creates a channel named `hasCheckpoint`. Then, a go routine is spawned to listen on this channel. When a signal is received on `hasCheckpoint`, the following steps are taken to process the pending checkpoint updates up to this point:
+
+1. Acquire the mutex lock for updating coaleased and waiters
+
+2. Copy the current content of the `coaleased` map into `cpd` and clear the map; copy `waiters` to `ws` and reset `waiters` as `nil`
+
+3. Release the mutex lock
+
+4. If there are pending checkpoint updates to be processed, `Update()` of `FileCheckpointsDB` is called to update the data structures and broadcast the checkpoint differences to the web clients
+
+5. The process concludes by signaling its completion via `rc.checkpointsWg.Done()`
+
+```jsx
+func (rc *Controller) listenCheckpointUpdates(logger log.Logger) {
+    var lock sync.Mutex
+    coalesed := make(map[string]*checkpoints.TableCheckpointDiff)
+    var waiters []chan<- error
+
+    hasCheckpoint := make(chan struct{}, 1)
+    defer close(hasCheckpoint)
+
+    go func() {
+        for range hasCheckpoint {
+            lock.Lock()
+            cpd := coalesed
+            coalesed = make(map[string]*checkpoints.TableCheckpointDiff)
+            ws := waiters
+            waiters = nil
+            lock.Unlock()
+            if len(cpd) > 0 {
+                err := rc.checkpointsDB.Update(rc.taskCtx, cpd)
+                for _, w := range ws {
+                    w <- common.NormalizeOrWrapErr(common.ErrUpdateCheckpoint, err)
+                }
+                web.BroadcastCheckpointDiff(cpd)
+            }
+            rc.checkpointsWg.Done()
+        }
+    }()
+    // ...
+```
+
+<Callout>
+Note: the `Update()` method here first updates the data structures, then calls the save() function defined in [here](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/checkpoints/checkpoints.go#L1213) to marshal the checkpoint data in the data structures and write it to the storage file.
+</Callout>
+
+The second half of `listenCheckpointUpdates()` implements a for range loop to listen on the channel `rc.saveCpCh`. `saveCpCh` is a field of the import controller. It is a channel of object `saveCp`. `saveCp` is a struct containing information such as the table name, a table checkpoint merger and a waiting channel.
+
+```jsx
+type Controller struct {
+    //...
+    saveCpCh      chan saveCp
+    //...
+}
+
+type saveCp struct {
+    tableName string
+    merger    checkpoints.TableCheckpointMerger
+    waitCh    chan<- error
+}
+```
+
+When checkpoint update requests are initiated from other segments of the code, they are sent over to the `saveCpCh` channel. Here is the process of saving a checkpoint update:
+
+1. Acquire the mutex lock
+
+2. If the table name of this checkpoint is not in the `coalesed` map, create a new `tableCheckpointDiff` object and save it into the coalesed map
+
+3. Merge the table checkpoint difference
+
+4. If the `hasCheckpoint` channel is empty, a signal is sent to it to indicate that there are pending checkpoint updates awaiting processing; if not empty, it implies that an update operation is already underway
+
+5. Release the mutex lock
+
+Source code link: [https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/import.go#L1069](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/import.go#L1069)
+
+This `savecpch` channel is eventually closed in the final phase of the Lightning import process: `cleanCheckpoints`. The method `waitCheckpointFinish()` is invoked to both close the channel and await the completion of the checkpoint process, ensuring a safe cleanup.
+
+[https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/import.go#L2081](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/import.go#L2081)
+
+Here are some examples of sending update requests through the channel `rc.saveCpCh`:
+
+- In `importTable()`, there are some saveCp objects sent to the channel to update the checkpoint data regarding the allocator's rebasing.
+
+  - [https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/table_import.go#L189](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/table_import.go#L189)
+
+- We can also find some checkpoint saving requests in the function `saveCheckpoint()`.
+
+  - [https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/import.go#L2296](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/import.go#L2296)
+
+  - `saveCheckpoint()` is called in places like `preprocessEngine()`, which does some preprocess work.
+
+    - [https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/table_import.go#L616](https://github.com/pingcap/tidb/blob/v7.1.0/br/pkg/lightning/importer/table_import.go#L616)
+
+### Checkpoint Restoration
+
+In cases where Lightning is interrupted and then restarted, the checkpoint data previously stored in the file can be restored.
+
+Recall what we have discussed in the "Initialize Checkpoint DB" section. In the function `NewImportControllerWithPauser()`, when the `CheckpointStorage` is defined, `NewFileCheckpointsDBWithExstorageFileName()` is invoked. It then calls `newFileCheckpointsDB()` to open the database file and restore the information from the provided storage file. When the checkpoint file is intact and can be successfully accessed, its contents are read and unmarshaled.
+
+Essentially, this step copies the checkpoint information from the storage file into TiDB's data structure `FileCheckpointsDB`. In subsequent phases of the import process, when needed, the `Get()` method of `FileCheckpointsDB` is used to retrieve data from the localized data structure.
+
+## References
+[https://docs.pingcap.com/tidb/stable/tidb-lightning-checkpoints](https://docs.pingcap.com/tidb/stable/tidb-lightning-checkpoints)

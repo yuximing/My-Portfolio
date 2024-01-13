@@ -1,22 +1,19 @@
-import me from '../app/avatar.jpg';
+import me from '../app/myavatar.jpg';
 
-export const name = 'Lee Robinson';
+export const name = 'Ximing Yu';
 export const avatar = me;
 export const about = () => {
   return (
     <>
-      Hey, I'm Lee. I'm the <b>VP of Developer Experience at Vercel</b> where my
-      team helps developers build a faster web.
+      Hi! My name is Ximing and I'm a fourth-year Computer Science student with a specialization in Software Design at Queen's University.
     </>
   );
 };
 export const bio = () => {
   return (
     <>
-      I'm a Next.js contributor and help lead our open-source communities. I'm
-      passionate about frontend development and have created courses on React,
-      Next.js, and web development. I'm an advisor and investor in early stage
-      startups.
+      {/* When I'm not sitting in front of my nice 34" LG monitor, I'm probably in the kitchen or the gym! I also love to travel and explore new places (especially good food places!). */}
+      I am interested in real-time, embedded software development, backend web development and cloud computing. I also always like to explore the latest in technology, experimenting with new frameworks, and staying curious about emerging trends.
     </>
   );
 };

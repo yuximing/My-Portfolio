@@ -14,22 +14,22 @@ const kaisei = localFont({
 
 export const metadata: Metadata = {
   title: {
-    default: 'Lee Robinson',
-    template: '%s | Lee Robinson',
+    default: 'Ximing Yu',
+    template: '%s | Ximing Yu',
   },
   description: 'Developer, writer, and creator.',
   openGraph: {
-    title: 'Lee Robinson',
+    title: 'Ximing Yu',
     description: 'Developer, writer, and creator.',
     url: 'https://leerob.io',
-    siteName: 'Lee Robinson',
-    images: [
-      {
-        url: 'https://leerob.io/og.jpg',
-        width: 1920,
-        height: 1080,
-      },
-    ],
+    siteName: 'Ximing Yu',
+    // images: [
+    //   {
+    //     url: 'https://leerob.io/og.jpg',
+    //     width: 1920,
+    //     height: 1080,
+    //   },
+    // ],
     locale: 'en-US',
     type: 'website',
   },
@@ -45,7 +45,7 @@ export const metadata: Metadata = {
     },
   },
   twitter: {
-    title: 'Lee Robinson',
+    title: 'Ximing Yu',
     card: 'summary_large_image',
   },
   icons: {

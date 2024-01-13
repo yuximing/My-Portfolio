@@ -1,88 +1,27 @@
-import type { Metadata } from 'next';
-import {
-  GitHubIcon,
-  YoutubeIcon,
-  ArrowIcon,
-  TwitterIcon,
-} from 'components/icons';
-
-export const metadata: Metadata = {
-  title: 'About',
-  description: 'VP of Developer Experience at Vercel.',
-};
-
 export default function AboutPage() {
   return (
     <section>
       <h1 className="font-bold text-3xl font-serif">About Me</h1>
       <p className="my-5 text-neutral-800 dark:text-neutral-200">
-        Hey, I'm Lee. Most folks know me as <b>leerob</b> online.
+        Greetings! Here's a closer look at who I am beyond the lines of code:
       </p>
-      <div className="prose prose-neutral dark:prose-invert text-neutral-800 dark:text-neutral-200">
-        <p>
-          I'm currently the <b>VP of Developer Experience at Vercel</b>, where I
-          lead our Developer Relations and Documentation teams. I focus on{' '}
-          <b>educating and growing</b> the Vercel and Next.js communities.
-        </p>
-        <hr />
-        <p>
-          I'm passionate about many creative pursuits, including music,
-          photography, videography, and of course, coding. This combination of
-          interests is what ultimately led me to my current role in building
-          developer communities.
-        </p>
-        <p>
-          I <b>love</b> building for the web. From something as simple as a
-          single HTML file – all the way to large Next.js applications. The web
-          is incredible. Anyone can become a developer, writer, or creator – and
-          no one has to ask for permission. You can just build.
-        </p>
-        <p className="mb-8">
-          Outside of Vercel, I <b>angel invest</b> in developer tools companies
-          and <b>advise early-stage startups</b>. I also do Developer Relations
-          consulting work, helping companies take their DevRel function from 0
-          to 1, or provide guidance on growing communities, content creation,
-          and developer marketing.
-        </p>
-        <div className="flex flex-col gap-2 md:flex-row md:gap-2">
-          <a
-            rel="noopener noreferrer"
-            target="_blank"
-            href="https://twitter.com/leeerob"
-            className="flex w-full border border-neutral-200 dark:border-neutral-800 rounded-lg p-4 no-underline items-center text-neutral-800 dark:text-neutral-200 hover:dark:bg-neutral-900 hover:bg-neutral-100 transition-all justify-between"
-          >
-            <div className="flex items-center">
-              <TwitterIcon />
-              <div className="ml-3">Twitter</div>
-            </div>
-            <ArrowIcon />
-          </a>
-          <a
-            rel="noopener noreferrer"
-            target="_blank"
-            href="https://github.com/leerob"
-            className="flex w-full border border-neutral-200 dark:border-neutral-800 rounded-lg p-4 no-underline items-center text-neutral-800 dark:text-neutral-200 hover:dark:bg-neutral-900 hover:bg-neutral-100 transition-all justify-between"
-          >
-            <div className="flex items-center">
-              <GitHubIcon />
-              <div className="ml-3">GitHub</div>
-            </div>
-            <ArrowIcon />
-          </a>
-          <a
-            rel="noopener noreferrer"
-            target="_blank"
-            href="https://www.youtube.com/@leerob"
-            className="flex w-full border border-neutral-200 dark:border-neutral-800 rounded-lg p-4 no-underline items-center text-neutral-800 dark:text-neutral-200 hover:dark:bg-neutral-900 hover:bg-neutral-100 transition-all justify-between"
-          >
-            <div className="flex items-center">
-              <YoutubeIcon />
-              <div className="ml-3">YouTube</div>
-            </div>
-            <ArrowIcon />
-          </a>
-        </div>
-      </div>
+
+      <h2 className="my-5 font-bold text-xl text-neutral-800 dark:text-neutral-200">The Story So Far:</h2>
+      <p className="my-5 text-neutral-800 dark:text-neutral-200">
+      I began my academic journey with a passion for unraveling the complexities of software design. As I navigated through various interesting courses in computer science, my curiosity only deepened. This curiosity, combined with my self-starter mentality, led me to hands-on experiences as a Software Engineer Co-op at Ciena, where I had the privilege of contributing to impactful projects and refining my skills.
+      </p>
+
+      <h2 className="my-5 font-bold text-xl text-neutral-800 dark:text-neutral-200">Teaching and Mentoring:</h2>
+      <p className="my-5 text-neutral-800 dark:text-neutral-200">
+      Beyond coding, I find immense satisfaction in sharing knowledge. My role as a Teaching Assistant at Queen's University allowed me to guide fellow students through the intricacies of computer science, discrete mathematics, and more. In my role as a Teaching Assistant at Queen's University and a Programming Mentor at Kingston Frontenac Public Library, I excel in simplifying complex technical concepts for individuals with no prior technical background. My approach fosters a collaborative learning atmosphere, creating an inclusive environment where everyone feels empowered to explore the exciting world of programming.
+      </p>
+
+      <h2 className="my-5 font-bold text-xl text-neutral-800 dark:text-neutral-200">Projects That Define Me:</h2>
+      <p className="my-5 text-neutral-800 dark:text-neutral-200">
+      I believe in the power of projects to showcase creativity and refine skills. Some of the interesting projects I have worked on are "Psychokinefish," a 2D side-scrolling arcade game, "Mini Airbnb," a full-stack web application, and "Weatherly," a mobile real-time weather application.
+
+      Recently, I've delved into the exciting world of machine learning with a project building a sign language detector. This exploration reflects my dedication to staying at the forefront of technological advancements. Additionally, I'm actively honing my skills in embedded software programming through upcoming fun projects on Raspberry Pi. Stay tuned for more projects that showcase my passion for continuous learning and hands-on exploration in technologies.
+</p>
     </section>
   );
 }
