@@ -17,3 +17,10 @@ export const bio = () => {
     </>
   );
 };
+export const extra = () => {
+  return (
+    <>
+      I am actively seeking a 4-month Software Engineer internship in Summer 2024 and a full-time Software Engineer opportunity starting in January 2025.
+    </>
+  );
+};
